@@ -6,15 +6,16 @@
 use std::{
     borrow::Borrow,
     fmt::Display,
+    mem::MaybeUninit,
     ops::Deref,
     path::{Component, Path},
 };
 
-use bincode::{Decode, Encode, de::Decoder, error::DecodeError};
 use diff::Diff;
 use ref_cast::{RefCastCustom, ref_cast_custom};
 use serde::{Deserialize, Serialize};
 use vite_str::Str;
+use wincode::{SchemaRead, SchemaWrite, config::Config, error::ReadResult, io::Reader};
 
 /// A relative path with additional guarantees to make it portable:
 ///
@@ -72,16 +73,16 @@ impl RelativePath {
     /// yields `a/c` instead of the correct `x/c`. Use
     /// [`std::fs::canonicalize`] when you need symlink-correct resolution.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the cleaned path is no longer a valid relative path, which
-    /// should never happen in practice.
-    #[must_use]
-    pub fn clean(&self) -> RelativePathBuf {
+    /// Returns an error if the cleaned path is no longer a valid relative path.
+    /// This can happen on Windows when malformed inputs such as `foo/C:/bar`
+    /// are cleaned into drive-prefixed paths.
+    pub fn clean(&self) -> Result<RelativePathBuf, FromPathError> {
         use path_clean::PathClean as _;
 
         let cleaned = self.as_path().clean();
-        RelativePathBuf::new(cleaned).expect("cleaning a relative path preserves relativity")
+        RelativePathBuf::new(cleaned)
     }
 
     /// Returns a path that, when joined onto `base`, yields `self`.
@@ -101,13 +102,29 @@ impl RelativePath {
 
 /// A owned relative path buf with the same guarantees as `RelativePath`
 #[derive(
-    Debug, Encode, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Serialize, Deserialize, Default,
+    Debug, SchemaWrite, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Serialize, Deserialize, Default,
 )]
 #[expect(
     clippy::unsafe_derive_deserialize,
-    reason = "unsafe in Decode impl validates portability invariants"
+    reason = "unsafe in SchemaRead impl validates portability invariants"
 )]
 pub struct RelativePathBuf(Str);
+
+// SAFETY: Delegates to `Str`'s SchemaRead impl; dst is initialized only on Ok.
+unsafe impl<'de, C: Config> SchemaRead<'de, C> for RelativePathBuf {
+    type Dst = Self;
+
+    fn read(mut reader: impl Reader<'de>, dst: &mut MaybeUninit<Self::Dst>) -> ReadResult<()> {
+        let path_str = <Str as SchemaRead<'de, C>>::get(&mut reader)?;
+        Self::new(path_str.as_str()).map_or(
+            Err(wincode::error::ReadError::Custom("invalid relative path in encoded data")),
+            |path| {
+                dst.write(path);
+                Ok(())
+            },
+        )
+    }
+}
 
 impl AsRef<Path> for RelativePathBuf {
     fn as_ref(&self) -> &Path {
@@ -210,27 +227,11 @@ impl RelativePathBuf {
 
     #[must_use]
     pub fn as_relative_path(&self) -> &RelativePath {
-        // SAFETY: RelativePathBuf's constructors (new, Decode) validate portability
+        // SAFETY: RelativePathBuf's constructors (new, SchemaRead) validate portability
         // invariants, so the inner string is guaranteed to be a valid portable path.
         unsafe { RelativePath::assume_portable(&self.0) }
     }
 }
-
-impl<Context> Decode<Context> for RelativePathBuf {
-    fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
-        let path_str = Str::decode(decoder)?;
-        Self::new(path_str.as_str()).map_err(|err| {
-            #[expect(
-                clippy::disallowed_macros,
-                reason = "bincode::error::DecodeError requires std format!"
-            )]
-            let msg = format!("{err}: {path_str}");
-            DecodeError::OtherString(msg)
-        })
-    }
-}
-
-bincode::impl_borrow_decode!(RelativePathBuf);
 
 impl TryFrom<&Path> for RelativePathBuf {
     type Error = FromPathError;
@@ -442,6 +443,20 @@ mod tests {
     }
 
     #[test]
+    fn clean() {
+        let rel_path = RelativePathBuf::new("../foo/../bar").unwrap();
+        let cleaned = rel_path.clean().unwrap();
+        assert_eq!(cleaned.as_str(), "../bar");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clean_malformed_drive_path() {
+        let rel_path = RelativePathBuf::new(r"foo\C:\bar").unwrap();
+        let_assert!(Err(FromPathError::NonRelative) = rel_path.clean());
+    }
+
+    #[test]
     fn strip_prefix() {
         let rel_path = RelativePathBuf::new("foo/bar/baz").unwrap();
         let prefix = RelativePathBuf::new("foo").unwrap();
@@ -452,10 +467,8 @@ mod tests {
     #[test]
     fn encode_decode() {
         let rel_path = RelativePathBuf::new("foo/bar").unwrap();
-        let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(&rel_path, config).unwrap();
-        let (decoded, _) =
-            bincode::decode_from_slice::<RelativePathBuf, _>(&encoded, config).unwrap();
+        let encoded = wincode::serialize(&rel_path).unwrap();
+        let decoded: RelativePathBuf = wincode::deserialize(&encoded).unwrap();
         assert_eq!(rel_path, decoded);
     }
 }

@@ -8,9 +8,9 @@ use std::{io, path::Path};
 
 #[cfg(target_os = "linux")]
 use fspy_seccomp_unotify::supervisor::supervise;
-#[cfg(not(target_env = "musl"))]
-use fspy_shared::ipc::NativeStr;
-use fspy_shared::ipc::{PathAccess, channel::channel};
+use fspy_shared::ipc::PathAccess;
+#[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
+use fspy_shared::ipc::{NativeStr, channel::channel};
 #[cfg(target_os = "macos")]
 use fspy_shared_unix::payload::Artifacts;
 use fspy_shared_unix::{
@@ -24,23 +24,20 @@ use syscall_handler::SyscallHandler;
 use tokio::task::spawn_blocking;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    ChildTermination, Command, TrackedChild,
-    arena::PathAccessArena,
-    error::SpawnError,
-    ipc::{OwnedReceiverLockGuard, SHM_CAPACITY},
-};
+#[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
+use crate::ipc::{OwnedReceiverLockGuard, SHM_CAPACITY};
+use crate::{ChildTermination, Command, TrackedChild, arena::PathAccessArena, error::SpawnError};
 
 #[derive(Debug)]
 pub struct SpyImpl {
     #[cfg(target_os = "macos")]
     artifacts: Artifacts,
 
-    #[cfg(not(target_env = "musl"))]
+    #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
     preload_path: Box<NativeStr>,
 }
 
-#[cfg(not(target_env = "musl"))]
+#[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
 const PRELOAD_CDYLIB_BINARY: &[u8] = include_bytes!(env!("CARGO_CDYLIB_FILE_FSPY_PRELOAD_UNIX"));
 
 impl SpyImpl {
@@ -48,8 +45,10 @@ impl SpyImpl {
     ///
     /// On musl targets, we don't build a preload library —
     /// only seccomp-based tracking is used.
-    pub fn init_in(#[cfg_attr(target_env = "musl", allow(unused))] dir: &Path) -> io::Result<Self> {
-        #[cfg(not(target_env = "musl"))]
+    pub fn init_in(
+        #[cfg_attr(any(target_os = "android", target_env = "musl"), allow(unused))] dir: &Path,
+    ) -> io::Result<Self> {
+        #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
         let preload_path = {
             use const_format::formatcp;
             use xxhash_rust::const_xxh3::xxh3_128;
@@ -67,7 +66,7 @@ impl SpyImpl {
         };
 
         Ok(Self {
-            #[cfg(not(target_env = "musl"))]
+            #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
             preload_path,
             #[cfg(target_os = "macos")]
             artifacts: {
@@ -89,19 +88,21 @@ impl SpyImpl {
         #[cfg(target_os = "linux")]
         let supervisor = supervise::<SyscallHandler>().map_err(SpawnError::Supervisor)?;
 
+        #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
         let (ipc_channel_conf, ipc_receiver) =
             channel(SHM_CAPACITY).map_err(SpawnError::ChannelCreation)?;
 
         let payload = Payload {
+            #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
             ipc_channel_conf,
 
             #[cfg(target_os = "macos")]
             artifacts: self.artifacts.clone(),
 
-            #[cfg(not(target_env = "musl"))]
+            #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
             preload_path: self.preload_path.clone(),
 
-            #[cfg(target_os = "linux")]
+            #[cfg(any(not(target_os = "android"), target_os = "linux"))]
             seccomp_payload: supervisor.payload().clone(),
         };
 
@@ -170,9 +171,14 @@ impl SpyImpl {
 
                 // Lock the ipc channel after the child has exited.
                 // We are not interested in path accesses from descendants after the main child has exited.
+                #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
                 let ipc_receiver_lock_guard =
                     OwnedReceiverLockGuard::lock_async(ipc_receiver).await?;
-                let path_accesses = PathAccessIterable { arenas, ipc_receiver_lock_guard };
+                let path_accesses = PathAccessIterable {
+                    arenas,
+                    #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
+                    ipc_receiver_lock_guard,
+                };
 
                 io::Result::Ok(ChildTermination { status, path_accesses })
             })
@@ -184,6 +190,7 @@ impl SpyImpl {
 
 pub struct PathAccessIterable {
     arenas: Vec<PathAccessArena>,
+    #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
     ipc_receiver_lock_guard: OwnedReceiverLockGuard,
 }
 
@@ -192,7 +199,14 @@ impl PathAccessIterable {
         let accesses_in_arena =
             self.arenas.iter().flat_map(|arena| arena.borrow_accesses().iter()).copied();
 
-        let accesses_in_shm = self.ipc_receiver_lock_guard.iter_path_accesses();
-        accesses_in_shm.chain(accesses_in_arena)
+        #[cfg(all(not(target_os = "android"), not(target_env = "musl")))]
+        {
+            let accesses_in_shm = self.ipc_receiver_lock_guard.iter_path_accesses();
+            accesses_in_shm.chain(accesses_in_arena)
+        }
+        #[cfg(any(target_os = "android", target_env = "musl"))]
+        {
+            accesses_in_arena
+        }
     }
 }

@@ -10,18 +10,18 @@ use std::{
     sync::Arc,
 };
 
-use bincode::{Decode, Encode};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use vite_path::{AbsolutePath, RelativePathBuf};
 use vite_str::Str;
+use wincode::{SchemaRead, SchemaWrite};
 
-use super::spawn::PathRead;
+use super::tracked_accesses::PathRead;
 use crate::{collections::HashMap, session::cache::InputChangeKind};
 
 /// Post-run fingerprint capturing file state after execution.
 /// Used to validate whether cached outputs are still valid.
-#[derive(Encode, Decode, Debug, Serialize)]
+#[derive(SchemaWrite, SchemaRead, Debug, Serialize)]
 pub struct PostRunFingerprint {
     /// Paths inferred from fspy during execution with their content fingerprints.
     /// Only populated when `input_config.includes_auto` is true.
@@ -29,7 +29,7 @@ pub struct PostRunFingerprint {
 }
 
 /// Fingerprint for a single path (file or directory)
-#[derive(Encode, Decode, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
+#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub enum PathFingerprint {
     /// Path was not found when fingerprinting
     NotFound,
@@ -43,7 +43,7 @@ pub enum PathFingerprint {
 }
 
 /// Kind of directory entry
-#[derive(Encode, Decode, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
+#[derive(SchemaWrite, SchemaRead, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub enum DirEntryKind {
     File,
     Dir,
@@ -53,7 +53,8 @@ pub enum DirEntryKind {
 impl PostRunFingerprint {
     /// Creates a new fingerprint from path accesses after task execution.
     ///
-    /// Negative glob filtering is done upstream in `spawn_with_tracking`.
+    /// Negative glob filtering is done upstream (see
+    /// [`super::tracked_accesses::TrackedPathAccesses::from_raw`]).
     /// Paths already present in `globbed_inputs` are skipped — they are
     /// already tracked by the prerun glob fingerprint, and the read-write
     /// overlap check in `execute_spawn` guarantees the task did not modify

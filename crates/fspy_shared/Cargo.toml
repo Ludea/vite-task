@@ -6,14 +6,21 @@ publish = false
 
 [dependencies]
 allocator-api2 = { workspace = true }
-bincode = { workspace = true }
+wincode = { workspace = true, features = ["derive"] }
 bitflags = { workspace = true }
 bstr = { workspace = true }
 bytemuck = { workspace = true, features = ["must_cast", "derive"] }
-shared_memory = { workspace = true, features = ["logging"] }
+native_str = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+shared_memory = { workspace = true, features = ["logging"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+memmap2 = "0.9.10"
+memfd = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 bytemuck = { workspace = true }

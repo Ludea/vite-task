@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 allocator-api2 = { workspace = true, features = ["alloc"] }
-bincode = { workspace = true }
+wincode = { workspace = true }
 bstr = { workspace = true, default-features = false }
 bumpalo = { workspace = true }
 const_format = { workspace = true, features = ["fmt"] }
@@ -29,7 +29,7 @@ fspy_seccomp_unotify = { workspace = true, features = ["supervisor"] }
 nix = { workspace = true, features = ["uio"] }
 tokio = { workspace = true, features = ["bytes"] }
 
-[target.'cfg(all(unix, not(target_env = "musl")))'.dependencies]
+[target.'cfg(all(unix, all(not(target_env = "musl"), not(target_os = "android"))))'.dependencies]
 fspy_preload_unix = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
